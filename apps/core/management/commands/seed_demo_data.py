@@ -59,18 +59,22 @@ class Command(BaseCommand):
         self.stdout.write(f"Seeded {len(locations_map)} Cebu locations.")
 
         # Seed Admin & Shelter Users
-        admin_user, _ = User.objects.get_or_create(
-            email="admin@amponcebu.ph",
-            defaults={
-                'full_name': "Platform Administrator",
-                'role': User.Role.PLATFORM_ADMIN,
-                'is_staff': True,
-                'is_superuser': True,
-            }
-        )
-        if _:
-            admin_user.set_password("AdminPass123!")
-            admin_user.save()
+        for admin_email in ["admin@surfur.ph", "admin@amponcebu.ph"]:
+            adm, created = User.objects.get_or_create(
+                email=admin_email,
+                defaults={
+                    'full_name': "SurFur Platform Administrator",
+                    'role': User.Role.PLATFORM_ADMIN,
+                    'is_staff': True,
+                    'is_superuser': True,
+                }
+            )
+            adm.is_staff = True
+            adm.is_superuser = True
+            if created or not adm.has_usable_password():
+                adm.set_password("AdminPass123!")
+            adm.save()
+            admin_user = adm
 
         shelter_user, _ = User.objects.get_or_create(
             email="islandrescue@amponcebu.ph",
