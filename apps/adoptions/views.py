@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from .models import AdoptionInquiry, InquiryStatusHistory
 from .serializers import AdoptionInquiryCreateSerializer, AdoptionInquirySerializer
 from apps.shelters.models import Shelter
+from apps.pets.models import Pet
 from apps.notifications.models import Notification
 from apps.core.permissions import IsShelterAdmin
 from apps.core.services import log_audit_event
@@ -127,6 +128,17 @@ class InquiryStatusUpdateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        pet = Pet.objects.select_for_update().get(pk=inquiry.pet_id)
+
+        if new_status == AdoptionInquiry.Status.COMPLETED:
+            if pet.adoption_status == 'adopted' or AdoptionInquiry.objects.filter(
+                pet=pet, status=AdoptionInquiry.Status.COMPLETED
+            ).exclude(pk=inquiry.pk).exists():
+                return Response(
+                    {'detail': 'This animal has already been adopted.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         old_status = inquiry.status
         notes = request.data.get('notes', '')
         inquiry.status = new_status
@@ -137,15 +149,19 @@ class InquiryStatusUpdateView(APIView):
 
         # Update Pet Status if finalized or requested
         pet_status = request.data.get('pet_status')
-        if pet_status and pet_status in ['available', 'pending', 'adopted', 'hold', 'unavailable']:
-            inquiry.pet.adoption_status = pet_status
-            inquiry.pet.save(update_fields=['adoption_status', 'updated_at'])
-        elif new_status == 'completed':
-            inquiry.pet.adoption_status = 'adopted'
-            inquiry.pet.save(update_fields=['adoption_status', 'updated_at'])
+        if new_status == 'completed':
+            pet.adoption_status = 'adopted'
+            pet.save(update_fields=['adoption_status', 'updated_at'])
+            AdoptionInquiry.objects.filter(
+                pet=pet,
+                status__in=['submitted', 'under_review', 'more_info', 'visit_requested', 'approved'],
+            ).exclude(pk=inquiry.pk).update(status=AdoptionInquiry.Status.DECLINED)
+        elif pet_status and pet_status in ['available', 'pending', 'hold', 'unavailable']:
+            pet.adoption_status = pet_status
+            pet.save(update_fields=['adoption_status', 'updated_at'])
         elif new_status == 'approved':
-            inquiry.pet.adoption_status = 'pending'
-            inquiry.pet.save(update_fields=['adoption_status', 'updated_at'])
+            pet.adoption_status = 'pending'
+            pet.save(update_fields=['adoption_status', 'updated_at'])
 
         # Log history
         InquiryStatusHistory.objects.create(
@@ -156,9 +172,16 @@ class InquiryStatusUpdateView(APIView):
             notes=notes,
         )
 
+        audit_action_map = {
+            'under_review': 'adoption_reviewed',
+            'approved': 'adoption_approved',
+            'rejected': 'adoption_rejected',
+            'declined': 'adoption_rejected',
+            'completed': 'adoption_completed',
+        }
         log_audit_event(
             request,
-            'adoption_status_updated',
+            audit_action_map.get(new_status, 'adoption_progress_updated'),
             'AdoptionInquiry',
             inquiry.id,
             {

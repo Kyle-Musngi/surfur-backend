@@ -102,23 +102,23 @@ class RoleBasedSecurityTests(TestCase):
         self.assertEqual(self.client.get('/api/v1/admin-panel/animals/').status_code, status.HTTP_200_OK)
         self.assertEqual(self.client.get('/api/v1/admin-panel/adoptions/').status_code, status.HTTP_200_OK)
 
-        # Mutating animals or adoptions is strictly forbidden
+        # Centralized animal management IS allowed for Platform Admin, while adoption decisions remain forbidden
         res_create_pet = self.client.post(
             f'/api/v1/pets/shelter/{self.shelter_a.slug}/create/',
-            {'name': 'Blocked', 'species': 'dog'},
+            {'name': 'CentralizedPet', 'species': 'dog'},
             format='json',
         )
-        self.assertEqual(res_create_pet.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_create_pet.status_code, status.HTTP_201_CREATED)
 
         res_edit_pet = self.client.patch(
             f'/api/v1/pets/{self.pet_a.id}/update/',
-            {'name': 'Hacked'},
+            {'name': 'UpdatedByAdmin'},
             format='json',
         )
-        self.assertEqual(res_edit_pet.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_edit_pet.status_code, status.HTTP_200_OK)
 
         res_delete_pet = self.client.delete(f'/api/v1/pets/{self.pet_a.id}/update/')
-        self.assertEqual(res_delete_pet.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_delete_pet.status_code, status.HTTP_204_NO_CONTENT)
 
         res_update_inquiry = self.client.patch(
             f'/api/v1/adoptions/{self.inquiry_a.id}/status/',
@@ -132,10 +132,10 @@ class RoleBasedSecurityTests(TestCase):
         self.client.force_authenticate(user=self.shelter_admin_b)
         self.assertEqual(self.client.get('/api/v1/admin-panel/dashboard/').status_code, status.HTTP_403_FORBIDDEN)
 
-        # Shelter B cannot edit Shelter A's pet or inquiry
+        # Shelter B cannot edit any pet (even its own or Shelter A's) and cannot process Shelter A's inquiry
         self.assertEqual(
             self.client.patch(f'/api/v1/pets/{self.pet_a.id}/update/', {'name': 'Stolen'}, format='json').status_code,
-            status.HTTP_404_NOT_FOUND,
+            status.HTTP_403_FORBIDDEN,
         )
         self.assertEqual(
             self.client.patch(

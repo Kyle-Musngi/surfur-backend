@@ -17,6 +17,7 @@ from django.utils.http import urlsafe_base64_encode
 from django.utils.text import slugify
 from rest_framework import generics, status, serializers
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -28,7 +29,7 @@ from apps.core.serializers import CebuLocationSerializer
 from apps.core.services import log_audit_event
 from apps.core.validators import resolve_media_url
 from apps.pets.models import Pet
-from apps.pets.serializers import PetDetailSerializer, PetListSerializer
+from apps.pets.serializers import PetCreateUpdateSerializer, PetDetailSerializer, PetListSerializer
 from apps.reports.models import StrayReport, StrayReportStatusHistory
 from apps.reports.services import notify_stray_report_status
 from apps.reports.views import StrayReportStatusHistorySerializer
@@ -639,11 +640,16 @@ class AdminUserPasswordResetView(APIView):
         return Response({'detail': f'Password reset instructions dispatched for {user.email}.'}, status=status.HTTP_200_OK)
 
 
-class AdminAnimalMonitoringListView(generics.ListAPIView):
-    """Strictly read-only Animal Monitoring for Platform Administrators."""
+class AdminAnimalListCreateView(generics.ListCreateAPIView):
+    """Centralized Animal Management (list across all shelters + create with shelter assignment) for Platform Administrators."""
     permission_classes = [IsPlatformAdmin]
-    serializer_class = PetListSerializer
     pagination_class = AdminPagination
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return PetCreateUpdateSerializer
+        return PetListSerializer
 
     def get_queryset(self):
         qs = Pet.objects.select_related('shelter', 'city').prefetch_related('images').all()
@@ -667,12 +673,78 @@ class AdminAnimalMonitoringListView(generics.ListAPIView):
             qs = qs.order_by(ordering)
         return qs
 
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        all_pets = Pet.objects.all()
+        response.data['summary'] = {
+            'total': all_pets.filter(is_archived=False).count(),
+            'available': all_pets.filter(is_archived=False, adoption_status='available').count(),
+            'pending': all_pets.filter(is_archived=False, adoption_status='pending').count(),
+            'adopted': all_pets.filter(is_archived=False, adoption_status='adopted').count(),
+            'archived': all_pets.filter(is_archived=True).count(),
+        }
+        return response
 
-class AdminAnimalMonitoringDetailView(generics.RetrieveAPIView):
-    """Strictly read-only Animal detail for Platform Administrators."""
+    def perform_create(self, serializer):
+        shelter = serializer.validated_data.get('shelter')
+        if not shelter:
+            raise serializers.ValidationError({'shelter': 'Assigned Shelter is required.'})
+        extra = {'city': shelter.city}
+        if not shelter.is_public:
+            extra['is_published'] = False
+        pet = serializer.save(**extra)
+        log_audit_event(
+            self.request,
+            'animal_created',
+            'Pet',
+            pet.id,
+            {'name': pet.name, 'species': pet.species, 'shelter': shelter.name},
+        )
+
+
+class AdminAnimalDetailUpdateView(generics.RetrieveUpdateDestroyAPIView):
+    """Centralized Animal detail, edit, photo management, and safe archival for Platform Administrators."""
     permission_classes = [IsPlatformAdmin]
-    serializer_class = PetDetailSerializer
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     queryset = Pet.objects.select_related('shelter', 'city').prefetch_related('images').all()
+
+    def get_serializer_class(self):
+        if self.request.method in ('PUT', 'PATCH'):
+            return PetCreateUpdateSerializer
+        return PetDetailSerializer
+
+    def perform_update(self, serializer):
+        target_shelter = serializer.validated_data.get('shelter')
+        save_kwargs = {}
+        if target_shelter is not None:
+            save_kwargs['city'] = target_shelter.city
+        pet = serializer.save(**save_kwargs)
+        req = self.request
+        photo_changed = bool(
+            req.FILES
+            or req.data.get('remove_image_ids')
+            or req.data.get('primary_image_id')
+            or req.data.get('image_url')
+        )
+        log_audit_event(
+            req,
+            'animal_photo_updated' if photo_changed else 'animal_updated',
+            'Pet',
+            pet.id,
+            {'name': pet.name, 'shelter': pet.shelter.name, 'adoption_status': pet.adoption_status, 'is_archived': pet.is_archived},
+        )
+
+    def perform_destroy(self, instance):
+        instance.is_archived = True
+        instance.is_published = False
+        instance.save(update_fields=['is_archived', 'is_published', 'updated_at'])
+        log_audit_event(
+            self.request,
+            'animal_archived',
+            'Pet',
+            instance.id,
+            {'name': instance.name, 'shelter': instance.shelter.name},
+        )
 
 
 class AdminAdoptionMonitoringListView(generics.ListAPIView):

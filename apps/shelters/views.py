@@ -10,6 +10,7 @@ from .serializers import (
     ShelterRegistrationSerializer,
 )
 from apps.core.permissions import IsPlatformAdmin, IsShelterAdmin
+from apps.core.models import PlatformSetting
 from apps.core.services import log_audit_event
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionInquiry
@@ -112,6 +113,7 @@ class MyShelterView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+        settings_obj = PlatformSetting.get_solo()
         return Response(
             {
                 'has_shelter': True,
@@ -119,36 +121,20 @@ class MyShelterView(APIView):
                 'is_active': shelter.is_active,
                 'is_public': shelter.is_public,
                 'verification_status': shelter.verification_status,
+                'platform_admin_contact': {
+                    'email': settings_obj.contact_email or None,
+                    'phone': settings_obj.contact_phone or None,
+                },
             },
             status=status.HTTP_200_OK,
         )
 
     def patch(self, request):
-        shelter = self._get_shelter(request.user)
-        if not shelter:
-            return Response(
-                {'detail': 'No active shelter is assigned to your account.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        serializer = ShelterSelfUpdateSerializer(shelter, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        log_audit_event(
-            request,
-            'shelter_profile_updated_by_owner',
-            'Shelter',
-            shelter.id,
-            {'name': shelter.name},
-        )
         return Response(
             {
-                'has_shelter': True,
-                'shelter': ShelterDetailSerializer(shelter).data,
-                'is_active': shelter.is_active,
-                'is_public': shelter.is_public,
-                'verification_status': shelter.verification_status,
+                'detail': 'Official shelter information is managed by the SurFur Platform Administrator.'
             },
-            status=status.HTTP_200_OK,
+            status=status.HTTP_403_FORBIDDEN,
         )
 
 

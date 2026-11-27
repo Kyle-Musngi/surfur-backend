@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404
 from .models import Pet, Favorite
 from .serializers import PetListSerializer, PetDetailSerializer, PetCreateUpdateSerializer, FavoriteSerializer
 from apps.shelters.models import Shelter
-from apps.core.permissions import IsShelterAdmin
+from apps.core.permissions import IsPlatformAdmin, IsShelterAdmin
 from apps.core.services import log_audit_event
 
 
@@ -47,13 +47,26 @@ class PetListView(generics.ListAPIView):
 
 
 class PetDetailView(generics.RetrieveAPIView):
-    """Public detail for a single pet."""
+    """
+    Public detail for an eligible published pet, or read-only detail for
+    assigned Shelter Administrators and Platform Administrators.
+    """
     serializer_class = PetDetailSerializer
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
+        user = self.request.user
+        base_qs = Pet.objects.select_related('shelter', 'city').prefetch_related('images')
+        if user.is_authenticated and user.is_active:
+            if getattr(user, 'role', None) == 'platform_admin':
+                return base_qs.all()
+            if getattr(user, 'role', None) == 'shelter_admin':
+                return base_qs.filter(
+                    Q(shelter__administrators=user) | Q(shelter__owner=user),
+                    shelter__is_archived=False,
+                ).distinct()
         return (
-            Pet.objects.filter(
+            base_qs.filter(
                 is_published=True,
                 is_archived=False,
                 shelter__is_active=True,
@@ -61,8 +74,6 @@ class PetDetailView(generics.RetrieveAPIView):
                 shelter__is_archived=False,
             )
             .exclude(shelter__verification_status=Shelter.VerificationStatus.SUSPENDED)
-            .select_related('shelter', 'city')
-            .prefetch_related('images')
         )
 
 
@@ -113,21 +124,23 @@ class ShelterPetListView(generics.ListAPIView):
 
 
 class ShelterPetCreateView(generics.CreateAPIView):
-    """Add a new pet listing under the authenticated Shelter Administrator's assigned shelter."""
+    """Add a new pet listing under an eligible shelter (Platform Administrator only)."""
     serializer_class = PetCreateUpdateSerializer
-    permission_classes = [IsShelterAdmin]
+    permission_classes = [IsPlatformAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def perform_create(self, serializer):
         shelter_slug = self.kwargs['shelter_slug']
-        user = self.request.user
         shelter = get_object_or_404(
-            Shelter,
-            Q(administrators=user) | Q(owner=user),
+            Shelter.objects.exclude(verification_status=Shelter.VerificationStatus.SUSPENDED),
             slug=shelter_slug,
+            is_active=True,
             is_archived=False,
         )
-        pet = serializer.save(shelter=shelter, city=shelter.city)
+        extra = {'shelter': shelter, 'city': shelter.city}
+        if not shelter.is_public:
+            extra['is_published'] = False
+        pet = serializer.save(**extra)
         log_audit_event(
             self.request,
             'animal_created',
@@ -138,26 +151,33 @@ class ShelterPetCreateView(generics.CreateAPIView):
 
 
 class PetUpdateView(generics.RetrieveUpdateDestroyAPIView):
-    """Edit, archive, or update a pet listing (strictly assigned Shelter Administrator only)."""
+    """Edit, archive, or update a pet listing (Platform Administrator only)."""
     serializer_class = PetCreateUpdateSerializer
-    permission_classes = [IsShelterAdmin]
+    permission_classes = [IsPlatformAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def get_queryset(self):
-        user = self.request.user
-        return Pet.objects.filter(
-            Q(shelter__administrators=user) | Q(shelter__owner=user),
-            shelter__is_archived=False,
-        ).distinct()
+        return Pet.objects.select_related('shelter', 'city').prefetch_related('images').all()
 
     def perform_update(self, serializer):
-        pet = serializer.save()
+        target_shelter = serializer.validated_data.get('shelter')
+        save_kwargs = {}
+        if target_shelter is not None:
+            save_kwargs['city'] = target_shelter.city
+        pet = serializer.save(**save_kwargs)
+        req = self.request
+        photo_changed = bool(
+            req.FILES
+            or req.data.get('remove_image_ids')
+            or req.data.get('primary_image_id')
+            or req.data.get('image_url')
+        )
         log_audit_event(
-            self.request,
-            'animal_updated',
+            req,
+            'animal_photo_updated' if photo_changed else 'animal_updated',
             'Pet',
             pet.id,
-            {'name': pet.name, 'adoption_status': pet.adoption_status, 'is_archived': pet.is_archived},
+            {'name': pet.name, 'shelter': pet.shelter.name, 'adoption_status': pet.adoption_status, 'is_archived': pet.is_archived},
         )
 
     def perform_destroy(self, instance):

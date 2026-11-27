@@ -4,6 +4,7 @@ from rest_framework import serializers
 from .models import Pet, PetImage, Favorite
 from apps.core.serializers import CebuLocationSerializer
 from apps.core.validators import resolve_media_url, validate_uploaded_image
+from apps.shelters.models import Shelter
 
 MAX_ANIMAL_IMAGES = 5
 
@@ -22,14 +23,17 @@ class PetImageSerializer(serializers.ModelSerializer):
 
 class PetListSerializer(serializers.ModelSerializer):
     primary_image = serializers.SerializerMethodField()
+    shelter_id = serializers.UUIDField(source='shelter.id', read_only=True)
     shelter_name = serializers.CharField(source='shelter.name', read_only=True)
+    shelter_slug = serializers.CharField(source='shelter.slug', read_only=True)
     city_name = serializers.CharField(source='city.name', read_only=True)
 
     class Meta:
         model = Pet
         fields = (
             'id', 'name', 'species', 'breed', 'sex', 'age_category', 'size',
-            'adoption_status', 'is_published', 'is_archived', 'shelter_name', 'city_name',
+            'adoption_status', 'is_published', 'is_archived',
+            'shelter_id', 'shelter_name', 'shelter_slug', 'city_name',
             'primary_image', 'is_vaccinated', 'is_sterilized', 'has_special_needs',
             'good_with_children', 'good_with_dogs', 'good_with_cats', 'created_at',
         )
@@ -46,6 +50,7 @@ class PetDetailSerializer(serializers.ModelSerializer):
     images = PetImageSerializer(many=True, read_only=True)
     primary_image = serializers.SerializerMethodField()
     city_detail = CebuLocationSerializer(source='city', read_only=True)
+    shelter_id = serializers.UUIDField(source='shelter.id', read_only=True)
     shelter_name = serializers.CharField(source='shelter.name', read_only=True)
     shelter_slug = serializers.CharField(source='shelter.slug', read_only=True)
 
@@ -59,7 +64,7 @@ class PetDetailSerializer(serializers.ModelSerializer):
             'has_special_needs', 'special_needs_description', 'health_notes',
             'good_with_children', 'good_with_dogs', 'good_with_cats',
             'adoption_status', 'is_published', 'is_archived',
-            'shelter_name', 'shelter_slug', 'city_detail',
+            'shelter_id', 'shelter_name', 'shelter_slug', 'city_detail',
             'primary_image', 'images', 'created_at', 'updated_at',
         )
 
@@ -86,6 +91,12 @@ class FavoriteSerializer(serializers.ModelSerializer):
 
 
 class PetCreateUpdateSerializer(serializers.ModelSerializer):
+    shelter = serializers.PrimaryKeyRelatedField(
+        queryset=Shelter.objects.filter(is_archived=False),
+        required=False,
+    )
+    shelter_name = serializers.CharField(source='shelter.name', read_only=True)
+    shelter_slug = serializers.CharField(source='shelter.slug', read_only=True)
     image_url = serializers.URLField(required=False, allow_blank=True, write_only=True)
     uploaded_image = serializers.ImageField(required=False, allow_null=True, write_only=True)
     primary_image_id = serializers.IntegerField(required=False, allow_null=True, write_only=True)
@@ -96,7 +107,8 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pet
         fields = (
-            'id', 'name', 'species', 'breed', 'sex', 'size', 'color',
+            'id', 'shelter', 'shelter_name', 'shelter_slug',
+            'name', 'species', 'breed', 'sex', 'size', 'color',
             'estimated_birth_date', 'age_years', 'age_months', 'age_category',
             'description', 'personality', 'rescue_story',
             'is_vaccinated', 'is_dewormed', 'is_sterilized',
@@ -128,6 +140,18 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
     def validate_uploaded_image(self, value):
         return validate_uploaded_image(value, max_mb=5)
 
+    def validate_shelter(self, shelter):
+        if shelter.is_archived or not shelter.is_active or shelter.verification_status == Shelter.VerificationStatus.SUSPENDED:
+            raise serializers.ValidationError(
+                'Animals cannot be assigned to an inactive, suspended, or archived shelter.'
+            )
+        if self.instance and shelter.id != self.instance.shelter_id:
+            if self.instance.inquiries.exists():
+                raise serializers.ValidationError(
+                    'Cannot reassign an animal with existing adoption applications or history to another shelter.'
+                )
+        return shelter
+
     def validate(self, data):
         files = self._get_uploaded_files()
         for f in files:
@@ -143,6 +167,31 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'uploaded_images': f'Maximum {MAX_ANIMAL_IMAGES} photographs allowed per animal.'}
             )
+
+        requested_status = data.get('adoption_status')
+        if requested_status == 'adopted':
+            has_completed = bool(self.instance and self.instance.inquiries.filter(status='completed').exists())
+            if not has_completed:
+                raise serializers.ValidationError(
+                    {'adoption_status': 'Adopted status can only be set through an authorized Shelter Administrator\'s adoption completion workflow.'}
+                )
+        if self.instance and requested_status and requested_status != self.instance.adoption_status:
+            if self.instance.inquiries.filter(status='completed').exists() and requested_status != 'adopted':
+                raise serializers.ValidationError(
+                    {'adoption_status': 'Cannot change status of an animal with a completed adoption record.'}
+                )
+            if self.instance.inquiries.filter(status='approved').exists() and requested_status == 'available':
+                raise serializers.ValidationError(
+                    {'adoption_status': 'Cannot mark an animal available while an adoption application is approved.'}
+                )
+
+        target_shelter = data.get('shelter') or (self.instance.shelter if self.instance else None)
+        if target_shelter and (
+            not target_shelter.is_public
+            or not target_shelter.is_active
+            or target_shelter.verification_status == Shelter.VerificationStatus.SUSPENDED
+        ):
+            data['is_published'] = False
 
         is_published = data.get('is_published', self.instance.is_published if self.instance else False)
         if self.instance and is_published and remove_ids and total_after == 0:

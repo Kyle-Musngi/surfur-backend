@@ -235,7 +235,16 @@ class StrayReportAndAnalyticsTests(TestCase):
             os.remove(report.photo.path)
 
     def test_shelter_animal_image_upload_and_admin_reports_analytics(self):
+        # Shelter Admin cannot upload/create animals; Platform Admin creates & uploads animal photos
         self.client.force_authenticate(user=self.shelter_admin1)
+        blocked_res = self.client.post(
+            f'/api/v1/pets/shelter/{self.shelter1.slug}/create/',
+            {'name': 'Choco', 'species': 'dog'},
+            format='multipart',
+        )
+        self.assertEqual(blocked_res.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.platform_admin)
         pet_res = self.client.post(
             f'/api/v1/pets/shelter/{self.shelter1.slug}/create/',
             {
