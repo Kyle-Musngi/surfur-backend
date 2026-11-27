@@ -420,4 +420,7 @@ Schedule an initial wellness visit with a licensed Cebu veterinarian within the 
             }
         )
 
+        from apps.accounts.provisioning import provision_demo_accounts_from_env
+        provision_demo_accounts_from_env()
+
         self.stdout.write(self.style.SUCCESS("Demo data seeded successfully for AmponCebu!"))
