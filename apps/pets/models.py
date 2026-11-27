@@ -76,6 +76,7 @@ class Pet(models.Model):
         default=AdoptionStatus.AVAILABLE
     )
     is_published = models.BooleanField(default=False)
+    is_archived = models.BooleanField(default=False)
 
     # Location (inherits shelter city but stored for query convenience)
     city = models.ForeignKey(
@@ -109,7 +110,8 @@ class Pet(models.Model):
 
 class PetImage(models.Model):
     pet = models.ForeignKey(Pet, on_delete=models.CASCADE, related_name='images')
-    image_url = models.URLField()
+    image_url = models.URLField(blank=True)
+    image_file = models.ImageField(upload_to='pets/', null=True, blank=True)
     alt_text = models.CharField(max_length=255, blank=True)
     is_primary = models.BooleanField(default=False)
     display_order = models.PositiveSmallIntegerField(default=0)
@@ -117,7 +119,7 @@ class PetImage(models.Model):
 
     class Meta:
         db_table = 'pet_images'
-        ordering = ['display_order', 'created_at']
+        ordering = ['-is_primary', 'display_order', 'created_at']
 
     def save(self, *args, **kwargs):
         if self.is_primary:

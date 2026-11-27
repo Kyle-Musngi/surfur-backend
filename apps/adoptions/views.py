@@ -2,11 +2,15 @@ from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from .models import AdoptionInquiry, InquiryStatusHistory
 from .serializers import AdoptionInquiryCreateSerializer, AdoptionInquirySerializer
 from apps.shelters.models import Shelter
 from apps.notifications.models import Notification
+from apps.core.permissions import IsShelterAdmin
+from apps.core.services import log_audit_event
 
 
 class AdoptionInquiryCreateView(generics.CreateAPIView):
@@ -32,8 +36,8 @@ class AdoptionInquiryCreateView(generics.CreateAPIView):
                     related_resource_type='inquiry',
                     related_resource_id=str(inquiry.id),
                 )
-        except Exception as e:
-            print(f"Error creating notification: {e}")
+        except Exception:
+            pass
 
 
 class MyInquiriesView(generics.ListAPIView):
@@ -48,54 +52,80 @@ class MyInquiriesView(generics.ListAPIView):
 
 
 class InquiryDetailView(generics.RetrieveAPIView):
-    """Detail of a specific application."""
+    """Detail of a specific application (read-only)."""
     serializer_class = AdoptionInquirySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_platform_admin:
+        if user.role == 'platform_admin':
             return AdoptionInquiry.objects.all()
-        if user.is_shelter_admin:
-            return AdoptionInquiry.objects.filter(shelter__administrators=user)
+        if user.role == 'shelter_admin':
+            return AdoptionInquiry.objects.filter(
+                Q(shelter__administrators=user) | Q(shelter__owner=user)
+            ).distinct()
         return AdoptionInquiry.objects.filter(applicant=user)
 
 
 class ShelterInquiryListView(generics.ListAPIView):
-    """Shelter admin sees applications for their shelter's pets."""
+    """Shelter admin sees applications for their assigned shelter's pets."""
     serializer_class = AdoptionInquirySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsShelterAdmin]
 
     def get_queryset(self):
         shelter_slug = self.kwargs['shelter_slug']
         user = self.request.user
-        if user.is_platform_admin:
-            shelter = get_object_or_404(Shelter, slug=shelter_slug)
-        else:
-            shelter = get_object_or_404(Shelter, slug=shelter_slug, administrators=user)
-        return AdoptionInquiry.objects.filter(shelter=shelter).select_related('pet', 'applicant').order_by('-created_at')
+        shelter = get_object_or_404(
+            Shelter,
+            Q(administrators=user) | Q(owner=user),
+            slug=shelter_slug,
+            is_archived=False,
+        )
+        return (
+            AdoptionInquiry.objects.filter(shelter=shelter)
+            .select_related('pet', 'applicant')
+            .prefetch_related('status_history')
+            .order_by('-created_at')
+        )
 
 
 class InquiryStatusUpdateView(APIView):
-    """Update status of an adoption application with audit trail and pet status synchronization."""
-    permission_classes = [permissions.IsAuthenticated]
+    """
+    Update status of an adoption application with audit trail and pet status synchronization.
+    Strictly restricted to assigned Shelter Administrators (Platform Admins cannot approve/reject).
+    """
+    permission_classes = [IsShelterAdmin]
 
+    @transaction.atomic
     def patch(self, request, pk):
         user = request.user
-        try:
-            if user.is_platform_admin:
-                inquiry = AdoptionInquiry.objects.get(pk=pk)
-            elif user.is_shelter_admin:
-                inquiry = AdoptionInquiry.objects.get(pk=pk, shelter__administrators=user)
-            else:
-                return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        except AdoptionInquiry.DoesNotExist:
-            return Response({'detail': 'Not found or unauthorized for this shelter.'}, status=status.HTTP_404_NOT_FOUND)
+        inquiry = (
+            AdoptionInquiry.objects.filter(
+                Q(shelter__administrators=user) | Q(shelter__owner=user),
+                pk=pk,
+            )
+            .select_related('pet', 'shelter')
+            .first()
+        )
+        if not inquiry:
+            return Response(
+                {'detail': 'Not found or unauthorized for this shelter.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         new_status = request.data.get('status')
         valid_statuses = [s[0] for s in AdoptionInquiry.Status.choices]
         if new_status not in valid_statuses:
-            return Response({'detail': f'Invalid status. Choose from {valid_statuses}'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'detail': f'Invalid status. Choose from {valid_statuses}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if inquiry.status == AdoptionInquiry.Status.COMPLETED and new_status == AdoptionInquiry.Status.COMPLETED:
+            return Response(
+                {'detail': 'This adoption has already been marked as completed.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         old_status = inquiry.status
         notes = request.data.get('notes', '')
@@ -107,15 +137,15 @@ class InquiryStatusUpdateView(APIView):
 
         # Update Pet Status if finalized or requested
         pet_status = request.data.get('pet_status')
-        if pet_status and pet_status in ['available', 'pending', 'adopted', 'hold']:
+        if pet_status and pet_status in ['available', 'pending', 'adopted', 'hold', 'unavailable']:
             inquiry.pet.adoption_status = pet_status
-            inquiry.pet.save()
+            inquiry.pet.save(update_fields=['adoption_status', 'updated_at'])
         elif new_status == 'completed':
             inquiry.pet.adoption_status = 'adopted'
-            inquiry.pet.save()
+            inquiry.pet.save(update_fields=['adoption_status', 'updated_at'])
         elif new_status == 'approved':
             inquiry.pet.adoption_status = 'pending'
-            inquiry.pet.save()
+            inquiry.pet.save(update_fields=['adoption_status', 'updated_at'])
 
         # Log history
         InquiryStatusHistory.objects.create(
@@ -124,6 +154,19 @@ class InquiryStatusUpdateView(APIView):
             new_status=new_status,
             changed_by=user,
             notes=notes,
+        )
+
+        log_audit_event(
+            request,
+            'adoption_status_updated',
+            'AdoptionInquiry',
+            inquiry.id,
+            {
+                'reference_number': inquiry.reference_number,
+                'old_status': old_status,
+                'new_status': new_status,
+                'shelter': inquiry.shelter.name,
+            },
         )
 
         # Notify Applicant if user account exists
@@ -137,11 +180,11 @@ class InquiryStatusUpdateView(APIView):
                     related_resource_type='inquiry',
                     related_resource_id=str(inquiry.id),
                 )
-            except Exception as e:
-                print(f"Error creating applicant notification: {e}")
+            except Exception:
+                pass
 
         return Response({
             'status': new_status,
             'detail': 'Status updated successfully.',
-            'pet_status': inquiry.pet.adoption_status
+            'pet_status': inquiry.pet.adoption_status,
         }, status=status.HTTP_200_OK)

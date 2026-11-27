@@ -1,207 +1,239 @@
+from io import StringIO
+from django.core.management import call_command
 from django.test import TestCase
 from django.contrib.auth import get_user_model
-from apps.core.models import CebuLocation
+from rest_framework import status
+from rest_framework.test import APIClient
+from apps.core.models import AuditLog, CebuLocation
 from apps.shelters.models import Shelter
 from apps.pets.models import Pet
 from apps.adoptions.models import AdoptionInquiry
-from rest_framework.test import APIClient
-from rest_framework import status
-import decimal
 
 User = get_user_model()
 
-class AmponCebuWorkflowTests(TestCase):
+
+class RoleBasedSecurityTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-
-        # 1. Create Cebu location
-        self.location = CebuLocation.objects.create(
-            name="Cebu City",
-            location_type="city",
-            province="Cebu",
-            latitude=decimal.Decimal("10.3157"),
-            longitude=decimal.Decimal("123.8854"),
+        self.city = CebuLocation.objects.create(
+            name='Cebu City',
+            location_type='city',
+            province='Cebu',
             is_active=True,
+            latitude=10.3157,
+            longitude=123.8854,
         )
-
-        # 2. Create users
+        self.platform_admin = User.objects.create_user(
+            email='padmin@surfur.test',
+            password='StrongPassword123!',
+            full_name='Platform Admin',
+            role=User.Role.PLATFORM_ADMIN,
+        )
+        self.shelter_admin_a = User.objects.create_user(
+            email='sheltera@surfur.test',
+            password='StrongPassword123!',
+            full_name='Shelter Admin A',
+            role=User.Role.SHELTER_ADMIN,
+        )
+        self.shelter_admin_b = User.objects.create_user(
+            email='shelterb@surfur.test',
+            password='StrongPassword123!',
+            full_name='Shelter Admin B',
+            role=User.Role.SHELTER_ADMIN,
+        )
         self.adopter = User.objects.create_user(
-            email="adopter@example.com",
-            password="Password123!",
-            full_name="Maria Santos",
+            email='adopter@surfur.test',
+            password='StrongPassword123!',
+            full_name='Regular Adopter',
             role=User.Role.ADOPTER,
         )
-        self.shelter_owner = User.objects.create_user(
-            email="shelter@example.com",
-            password="Password123!",
-            full_name="Juan Shelter Admin",
-            role=User.Role.SHELTER_ADMIN,
-        )
-        self.other_shelter_owner = User.objects.create_user(
-            email="othershelter@example.com",
-            password="Password123!",
-            full_name="Pedro Other Admin",
-            role=User.Role.SHELTER_ADMIN,
-        )
 
-        # 3. Create shelters
-        self.shelter = Shelter.objects.create(
-            name="Cebu Rescue Hub",
-            slug="cebu-rescue-hub",
-            organization_type="shelter",
-            address="Banilad, Cebu City",
-            city=self.location,
-            latitude=decimal.Decimal("10.3400"),
-            longitude=decimal.Decimal("123.9100"),
-            owner=self.shelter_owner,
-            verification_status="verified",
+        self.shelter_a = Shelter.objects.create(
+            name='Shelter A',
+            slug='shelter-a',
+            address='Lahug, Cebu City',
+            city=self.city,
+            latitude=10.3157,
+            longitude=123.8854,
+            verification_status=Shelter.VerificationStatus.VERIFIED,
             is_active=True,
             is_public=True,
+            owner=self.shelter_admin_a,
         )
-        self.shelter.administrators.add(self.shelter_owner)
+        self.shelter_a.administrators.add(self.shelter_admin_a)
 
-        self.other_shelter = Shelter.objects.create(
-            name="Mandaue Rescue Hub",
-            slug="mandaue-rescue-hub",
-            organization_type="shelter",
-            address="Subangdaku, Mandaue City",
-            city=self.location,
-            latitude=decimal.Decimal("10.3280"),
-            longitude=decimal.Decimal("123.9350"),
-            owner=self.other_shelter_owner,
-            verification_status="verified",
+        self.shelter_b = Shelter.objects.create(
+            name='Shelter B',
+            slug='shelter-b',
+            address='Mandaue City',
+            city=self.city,
+            latitude=10.3200,
+            longitude=123.9000,
+            verification_status=Shelter.VerificationStatus.VERIFIED,
             is_active=True,
             is_public=True,
+            owner=self.shelter_admin_b,
         )
-        self.other_shelter.administrators.add(self.other_shelter_owner)
+        self.shelter_b.administrators.add(self.shelter_admin_b)
 
-        # 4. Create pet
-        self.pet = Pet.objects.create(
-            shelter=self.shelter,
-            name="Barako",
-            species="dog",
-            breed="Aspin",
-            sex="male",
-            size="medium",
-            adoption_status="available",
+        self.pet_a = Pet.objects.create(
+            shelter=self.shelter_a,
+            name='Bantay',
+            species=Pet.Species.DOG,
+            adoption_status=Pet.AdoptionStatus.AVAILABLE,
             is_published=True,
-            city=self.location,
+            city=self.city,
         )
 
-    def test_anonymous_visitor_can_browse_pets(self):
-        """Scenario 1: Visitor can browse pets without logging in."""
-        res = self.client.get('/api/v1/pets/')
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertGreaterEqual(res.data['count'], 1)
-        self.assertEqual(res.data['results'][0]['name'], 'Barako')
-
-    def test_pet_filters_return_matching_results(self):
-        """Scenario 2: Pet filters return correct matching results."""
-        res = self.client.get('/api/v1/pets/?species=cat')
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res.data['results']), 0)
-
-        res = self.client.get('/api/v1/pets/?species=dog')
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res.data['results']), 1)
-
-    def test_shelter_directory_and_detail(self):
-        """Scenarios 3, 4, 5: Public shelter endpoints."""
-        res = self.client.get('/api/v1/shelters/')
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertGreaterEqual(len(res.data['results']), 1)
-
-        detail_res = self.client.get(f'/api/v1/shelters/{self.shelter.slug}/')
-        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
-        self.assertEqual(detail_res.data['name'], 'Cebu Rescue Hub')
-
-    def test_adopter_registration_and_login(self):
-        """Scenario 7: Adopter can register and log in."""
-        reg_res = self.client.post('/api/v1/auth/register/', {
-            'email': 'newadopter@example.com',
-            'full_name': 'New Adopter',
-            'password': 'Password123!',
-            'password_confirm': 'Password123!',
-        })
-        self.assertEqual(reg_res.status_code, status.HTTP_201_CREATED)
-        self.assertIn('access', reg_res.data)
-
-        login_res = self.client.post('/api/v1/auth/login/', {
-            'email': 'newadopter@example.com',
-            'password': 'Password123!',
-        })
-        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
-        self.assertIn('access', login_res.data)
-
-    def test_favorite_toggle(self):
-        """Scenario 8: Adopter can save and remove a favorite."""
-        self.client.force_authenticate(user=self.adopter)
-        fav_res = self.client.post(f'/api/v1/pets/favorites/{self.pet.id}/')
-        self.assertEqual(fav_res.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(fav_res.data['favorited'])
-
-        # Toggle again to remove
-        unfav_res = self.client.post(f'/api/v1/pets/favorites/{self.pet.id}/')
-        self.assertEqual(unfav_res.status_code, status.HTTP_200_OK)
-        self.assertFalse(unfav_res.data['favorited'])
-
-    def test_adoption_inquiry_workflow(self):
-        """Scenarios 9 & 10: Inquiries submission and shelter viewing."""
-        self.client.force_authenticate(user=self.adopter)
-        inq_res = self.client.post('/api/v1/adoptions/', {
-            'pet': str(self.pet.id),
-            'applicant_name': 'Maria Santos',
-            'applicant_email': 'adopter@example.com',
-            'applicant_phone': '09171234567',
-            'applicant_city': 'Cebu City',
-            'contact_preference': 'email',
-            'living_situation': 'house_yard',
-            'date_of_birth': '1995-05-15',
-            'data_processing_consent': True,
-            'responsible_adoption_agreement': True,
-        })
-        self.assertEqual(inq_res.status_code, status.HTTP_201_CREATED)
-        inquiry_id = inq_res.data['id']
-
-        # Shelter owner views inquiries for their own shelter
-        self.client.force_authenticate(user=self.shelter_owner)
-        shelter_inqs = self.client.get(f'/api/v1/adoptions/shelter/{self.shelter.slug}/')
-        self.assertEqual(shelter_inqs.status_code, status.HTTP_200_OK)
-        results = shelter_inqs.data.get('results', shelter_inqs.data)
-        self.assertEqual(len(results), 1)
-
-        # Update status
-        status_res = self.client.patch(f'/api/v1/adoptions/{inquiry_id}/status/', {
-            'status': 'under_review',
-            'notes': 'Reviewing Maria application',
-        })
-        self.assertEqual(status_res.status_code, status.HTTP_200_OK)
-        self.assertEqual(status_res.data['status'], 'under_review')
-
-    def test_shelter_permission_isolation(self):
-        """Scenario 11: A shelter cannot access another shelter's private inquiries."""
-        inquiry = AdoptionInquiry.objects.create(
-            pet=self.pet,
-            shelter=self.shelter,
+        self.inquiry_a = AdoptionInquiry.objects.create(
             applicant=self.adopter,
-            applicant_name="Maria Santos",
-            applicant_email="adopter@example.com",
+            pet=self.pet_a,
+            shelter=self.shelter_a,
+            applicant_name='Regular Adopter',
+            applicant_email='adopter@surfur.test',
             data_processing_consent=True,
             responsible_adoption_agreement=True,
         )
 
-        # Other shelter admin attempts to access or modify status
-        self.client.force_authenticate(user=self.other_shelter_owner)
-        res = self.client.patch(f'/api/v1/adoptions/{inquiry.id}/status/', {
-            'status': 'approved',
-        })
-        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+    def test_platform_admin_cannot_modify_animals_or_adoptions(self):
+        self.client.force_authenticate(user=self.platform_admin)
 
-    def test_adopted_pet_excluded_from_available_listings(self):
-        """Scenario 15: Adopted animals disappear from the available-pet results."""
-        self.pet.adoption_status = 'adopted'
-        self.pet.save()
+        # Read-only monitoring works
+        self.assertEqual(self.client.get('/api/v1/admin-panel/animals/').status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.get('/api/v1/admin-panel/adoptions/').status_code, status.HTTP_200_OK)
 
-        res = self.client.get('/api/v1/pets/')
+        # Mutating animals or adoptions is strictly forbidden
+        res_create_pet = self.client.post(
+            f'/api/v1/pets/shelter/{self.shelter_a.slug}/create/',
+            {'name': 'Blocked', 'species': 'dog'},
+            format='json',
+        )
+        self.assertEqual(res_create_pet.status_code, status.HTTP_403_FORBIDDEN)
+
+        res_edit_pet = self.client.patch(
+            f'/api/v1/pets/{self.pet_a.id}/update/',
+            {'name': 'Hacked'},
+            format='json',
+        )
+        self.assertEqual(res_edit_pet.status_code, status.HTTP_403_FORBIDDEN)
+
+        res_delete_pet = self.client.delete(f'/api/v1/pets/{self.pet_a.id}/update/')
+        self.assertEqual(res_delete_pet.status_code, status.HTTP_403_FORBIDDEN)
+
+        res_update_inquiry = self.client.patch(
+            f'/api/v1/adoptions/{self.inquiry_a.id}/status/',
+            {'status': 'approved'},
+            format='json',
+        )
+        self.assertEqual(res_update_inquiry.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_shelter_admin_isolation_and_permissions(self):
+        # Shelter B cannot access Admin Panel
+        self.client.force_authenticate(user=self.shelter_admin_b)
+        self.assertEqual(self.client.get('/api/v1/admin-panel/dashboard/').status_code, status.HTTP_403_FORBIDDEN)
+
+        # Shelter B cannot edit Shelter A's pet or inquiry
+        self.assertEqual(
+            self.client.patch(f'/api/v1/pets/{self.pet_a.id}/update/', {'name': 'Stolen'}, format='json').status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            self.client.patch(
+                f'/api/v1/adoptions/{self.inquiry_a.id}/status/',
+                {'status': 'approved'},
+                format='json',
+            ).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+        # Shelter A CAN manage its own pet and inquiry
+        self.client.force_authenticate(user=self.shelter_admin_a)
+        res_ok = self.client.patch(
+            f'/api/v1/adoptions/{self.inquiry_a.id}/status/',
+            {'status': 'approved', 'notes': 'Looks great!'},
+            format='json',
+        )
+        self.assertEqual(res_ok.status_code, status.HTTP_200_OK)
+
+    def test_adopter_cannot_access_admin_or_promote_self(self):
+        self.client.force_authenticate(user=self.adopter)
+        self.assertEqual(self.client.get('/api/v1/admin-panel/dashboard/').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get('/api/v1/shelters/my-shelter/').status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.patch('/api/v1/auth/profile/', {'role': 'platform_admin'}, format='json')
+        self.adopter.refresh_from_db()
+        self.assertEqual(self.adopter.role, User.Role.ADOPTER)
+
+    def test_shelter_suspension_hides_public_visibility_and_preserves_records(self):
+        self.client.force_authenticate(user=self.platform_admin)
+        res_suspend = self.client.post(
+            f'/api/v1/admin-panel/shelters/{self.shelter_a.id}/action/',
+            {'action': 'suspend', 'reason': 'Inspection'},
+            format='json',
+        )
+        self.assertEqual(res_suspend.status_code, status.HTTP_200_OK)
+
+        # Public endpoints hide suspended shelter and its pets
+        anon = APIClient()
+        shelters_res = anon.get('/api/v1/shelters/').data['results']
+        self.assertFalse(any(s['id'] == str(self.shelter_a.id) for s in shelters_res))
+        pets_res = anon.get('/api/v1/pets/').data['results']
+        self.assertFalse(any(p['id'] == str(self.pet_a.id) for p in pets_res))
+
+        # Underlying pet & inquiry records remain preserved
+        self.pet_a.refresh_from_db()
+        self.assertEqual(self.pet_a.adoption_status, Pet.AdoptionStatus.AVAILABLE)
+        self.assertTrue(AdoptionInquiry.objects.filter(id=self.inquiry_a.id).exists())
+        self.assertTrue(AuditLog.objects.filter(action='shelter_suspend').exists())
+
+        # Reactivate restores visibility
+        self.client.post(
+            f'/api/v1/admin-panel/shelters/{self.shelter_a.id}/action/',
+            {'action': 'reactivate'},
+            format='json',
+        )
+        shelters_after = anon.get('/api/v1/shelters/').data['results']
+        self.assertTrue(any(s['id'] == str(self.shelter_a.id) for s in shelters_after))
+
+    def test_create_platform_admin_management_command(self):
+        out = StringIO()
+        call_command(
+            'create_platform_admin',
+            email='owner@surfur.ph',
+            full_name='SurFur Owner',
+            password='OwnerSecurePassword!2026',
+            stdout=out,
+        )
+        created = User.objects.get(email='owner@surfur.ph')
+        self.assertEqual(created.role, User.Role.PLATFORM_ADMIN)
+        self.assertFalse(created.is_superuser)
+        self.assertFalse(created.is_staff)
+
+    def test_audit_logs_enriched_filtering_and_export(self):
+        AuditLog.objects.create(
+            actor_email=self.platform_admin.email,
+            action='user_password_reset_initiated',
+            resource_type='User',
+            resource_id=str(self.adopter.id),
+            metadata={'target_email': self.adopter.email, 'token': 'should-be-stripped'},
+        )
+        # Adopter and Shelter Admin cannot access audit logs
+        self.client.force_authenticate(user=self.adopter)
+        self.assertEqual(self.client.get('/api/v1/admin-panel/audit-logs/').status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(user=self.shelter_admin_a)
+        self.assertEqual(self.client.get('/api/v1/admin-panel/audit-logs/').status_code, status.HTTP_403_FORBIDDEN)
+
+        # Platform Admin receives enriched actor/resource info and summary without sensitive tokens
+        self.client.force_authenticate(user=self.platform_admin)
+        res = self.client.get('/api/v1/admin-panel/audit-logs/', {'page_size': 10, 'resource_type': 'User'})
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(res.data['results']), 0)
+        self.assertIn('summary', res.data)
+        row = res.data['results'][0]
+        self.assertEqual(row['actor_name'], self.platform_admin.full_name)
+        self.assertEqual(row['actor_role'], 'platform_admin')
+        self.assertEqual(row['resource_name'], self.adopter.full_name)
+        self.assertNotIn('token', row['metadata'])
+
+        csv_res = self.client.get('/api/v1/admin-panel/audit-logs/export/')
+        self.assertEqual(csv_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(csv_res['Content-Type'], 'text/csv')

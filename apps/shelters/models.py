@@ -37,11 +37,14 @@ class Shelter(models.Model):
 
     # Location
     address = models.TextField()
+    barangay = models.CharField(max_length=100, blank=True)
+    province = models.CharField(max_length=100, default='Cebu', blank=True)
     city = models.ForeignKey(CebuLocation, on_delete=models.PROTECT, related_name='shelters')
     latitude = models.DecimalField(max_digits=10, decimal_places=7)
     longitude = models.DecimalField(max_digits=10, decimal_places=7)
 
     # Contact
+    contact_person = models.CharField(max_length=255, blank=True)
     phone_number = models.CharField(max_length=20, blank=True)
     email = models.EmailField(blank=True)
     website = models.URLField(blank=True)
@@ -72,6 +75,8 @@ class Shelter(models.Model):
     is_demo = models.BooleanField(default=False, help_text='Demo/seed data — not a real organization')
     is_active = models.BooleanField(default=True)
     is_public = models.BooleanField(default=True)
+    is_archived = models.BooleanField(default=False)
+    internal_notes = models.TextField(blank=True, help_text='Internal platform admin notes (never exposed publicly)')
 
     # Ownership
     owner = models.ForeignKey(

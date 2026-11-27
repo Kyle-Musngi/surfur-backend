@@ -38,3 +38,33 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f'{self.actor_email} {self.action} {self.resource_type} at {self.timestamp}'
+
+
+class PlatformSetting(models.Model):
+    """Singleton-style platform configuration managed by Platform Administrators."""
+    contact_email = models.EmailField(default='support@surfur.ph', blank=True)
+    contact_phone = models.CharField(max_length=50, blank=True)
+    support_desk_name = models.CharField(max_length=255, default='SurFur Animal Welfare Support Desk')
+    shelter_onboarding_message = models.TextField(
+        default='Interested in listing your shelter on SurFur? Please contact the SurFur administrator for shelter registration and verification.'
+    )
+    allow_public_stray_reports = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_platform_settings',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'platform_settings'
+
+    @classmethod
+    def get_solo(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return 'SurFur Platform Settings'

@@ -1,0 +1,47 @@
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python / Django
+*.py[cod]
+*$py.class
+__pycache__/
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+*.log
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE & Editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Backups
+backups/
+*.bak

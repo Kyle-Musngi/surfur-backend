@@ -60,12 +60,27 @@ class AdoptionInquiryCreateSerializer(serializers.ModelSerializer):
                 {'responsible_adoption_agreement': 'You must sign/agree to the responsible adoption covenant.'}
             )
 
-        # 3. Check pet adoption status
+        # 3. Check pet adoption status and shelter eligibility
         pet = data.get('pet')
-        if pet and pet.adoption_status not in ['available', 'pending']:
-            raise serializers.ValidationError(
-                {'pet': f'Pet "{pet.name}" is currently {pet.get_adoption_status_display()} and not open for applications.'}
-            )
+        if pet:
+            if pet.is_archived or not pet.is_published:
+                raise serializers.ValidationError(
+                    {'pet': f'Pet "{pet.name}" is not currently available for adoption.'}
+                )
+            shelter = pet.shelter
+            if (
+                not shelter.is_active
+                or not shelter.is_public
+                or shelter.is_archived
+                or shelter.verification_status == 'suspended'
+            ):
+                raise serializers.ValidationError(
+                    {'pet': 'This shelter is currently not accepting new adoption applications.'}
+                )
+            if pet.adoption_status not in ['available', 'pending']:
+                raise serializers.ValidationError(
+                    {'pet': f'Pet "{pet.name}" is currently {pet.get_adoption_status_display()} and not open for applications.'}
+                )
 
         return data
 

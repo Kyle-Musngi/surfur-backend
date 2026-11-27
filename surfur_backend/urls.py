@@ -36,6 +36,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/v1/auth/', include('apps.accounts.urls')),
     path('api/v1/core/', include('apps.core.urls')),
+    path('api/v1/admin-panel/', include('apps.core.admin_urls')),
     path('api/v1/shelters/', include('apps.shelters.urls')),
     path('api/v1/pets/', include('apps.pets.urls')),
     path('api/v1/adoptions/', include('apps.adoptions.urls')),
