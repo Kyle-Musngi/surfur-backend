@@ -1,8 +1,13 @@
 import os
+import io
+import warnings
 from PIL import Image
+from pypdf import PdfReader
+from pypdf.generic import IndirectObject, DictionaryObject, ArrayObject
+from django.core.files.base import ContentFile
 from rest_framework import serializers
 from apps.core.validators import resolve_media_url
-from .models import Conversation, Message, MessageAttachment, MessageReadState
+from .models import Conversation, Message, MessageAttachment, MessageReadState, unread_after
 
 MAX_ATTACHMENTS_PER_MESSAGE = 5
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -11,6 +16,33 @@ MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 ALLOWED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
 ALLOWED_PDF_EXTS = {'.pdf'}
+
+
+def validate_pdf(file):
+    """Accept passive, structurally valid PDFs; reject actions and embedded content."""
+    reader = PdfReader(file, strict=True)
+    if reader.is_encrypted or not 0 < len(reader.pages) <= 200:
+        raise ValueError('Encrypted or oversized PDF')
+    pending, seen = [reader.trailer], set()
+    blocked = {'/A', '/AA', '/OpenAction', '/JS', '/JavaScript', '/EmbeddedFiles',
+               '/EF', '/XFA', '/RichMediaContent', '/Launch', '/AcroForm'}
+    for _ in range(20000):
+        if not pending:
+            return
+        obj = pending.pop()
+        if isinstance(obj, IndirectObject):
+            key = (obj.idnum, obj.generation)
+            if key in seen:
+                continue
+            seen.add(key)
+            obj = obj.get_object()
+        if isinstance(obj, DictionaryObject):
+            if blocked.intersection(obj.keys()):
+                raise ValueError('Active PDF content')
+            pending.extend(obj.values())
+        elif isinstance(obj, ArrayObject):
+            pending.extend(obj)
+    raise ValueError('PDF is too complex')
 
 
 def validate_messaging_attachments(files):
@@ -34,20 +66,35 @@ def validate_messaging_attachments(files):
                 raise serializers.ValidationError(f'Image "{name}" exceeds the 5 MB limit.')
             try:
                 f.seek(0)
-                img = Image.open(f)
-                img.verify()
-                f.seek(0)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error', Image.DecompressionBombWarning)
+                    img = Image.open(f)
+                    fmt = img.format
+                    expected = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.webp': 'WEBP'}[ext]
+                    if fmt != expected or img.width * img.height > 20000000:
+                        raise ValueError('Unsupported image encoding or dimensions')
+                    img.load()
+                    clean = io.BytesIO()
+                    img.save(clean, format=fmt)
+                    f = ContentFile(clean.getvalue(), name=name)
+                    size = f.size
+                    if size > MAX_IMAGE_BYTES:
+                        raise ValueError('Decoded image is too large')
             except Exception:
                 raise serializers.ValidationError(f'Image "{name}" is invalid or corrupted.')
-            mime = getattr(f, 'content_type', '') or f'image/{ext.lstrip(".")}'
+            mime = Image.MIME[fmt]
             validated.append((f, name, MessageAttachment.FileType.IMAGE, mime, size))
         elif ext in ALLOWED_PDF_EXTS:
             if size > MAX_PDF_BYTES:
                 raise serializers.ValidationError(f'PDF "{name}" exceeds the 10 MB limit.')
             f.seek(0)
-            header = f.read(5)
-            f.seek(0)
-            if header != b'%PDF-':
+            try:
+                if f.read(5) != b'%PDF-':
+                    raise ValueError('Missing PDF header')
+                f.seek(0)
+                validate_pdf(f)
+                f.seek(0)
+            except Exception:
                 raise serializers.ValidationError(f'File "{name}" is not a valid PDF document.')
             validated.append((f, name, MessageAttachment.FileType.PDF, 'application/pdf', size))
         else:
@@ -95,10 +142,10 @@ class MessageSerializer(serializers.ModelSerializer):
             if rs.user_id == obj.sender_id:
                 continue
             if sender_role == 'shelter_admin' and getattr(rs.user, 'role', None) == 'platform_admin':
-                if rs.last_read_at >= obj.created_at:
+                if rs.last_read_at > obj.created_at or (rs.last_read_at == obj.created_at and rs.last_read_message_id and rs.last_read_message_id >= obj.id):
                     return True
             elif sender_role == 'platform_admin' and getattr(rs.user, 'role', None) == 'shelter_admin':
-                if rs.last_read_at >= obj.created_at:
+                if rs.last_read_at > obj.created_at or (rs.last_read_at == obj.created_at and rs.last_read_message_id and rs.last_read_message_id >= obj.id):
                     return True
         return False
 
@@ -163,5 +210,5 @@ class ConversationSerializer(serializers.ModelSerializer):
         else:
             qs = qs.filter(sender__role='platform_admin')
         if rs:
-            qs = qs.filter(created_at__gt=rs.last_read_at)
+            qs = qs.filter(unread_after(rs))
         return qs.count()

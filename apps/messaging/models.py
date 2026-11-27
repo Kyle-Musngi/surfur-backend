@@ -12,6 +12,17 @@ private_messaging_storage = FileSystemStorage(
 )
 
 
+def unread_after(read_state):
+    condition = models.Q(created_at__gt=read_state.last_read_at)
+    if read_state.last_read_message_id:
+        condition |= models.Q(created_at=read_state.last_read_at, id__gt=read_state.last_read_message_id)
+    return condition
+
+
+def get_private_messaging_storage():
+    return private_messaging_storage
+
+
 def messaging_attachment_path(instance, filename):
     ext = os.path.splitext(filename or '')[1].lower()
     if ext not in ('.jpg', '.jpeg', '.png', '.webp', '.pdf'):
@@ -77,6 +88,13 @@ class Message(models.Model):
     class Meta:
         db_table = 'messaging_messages'
         ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['conversation', 'sender', 'client_id'],
+                condition=~models.Q(client_id=''),
+                name='messaging_unique_client_submission',
+            ),
+        ]
 
     def __str__(self):
         return f"Message({self.id}, {self.request_type})"
@@ -95,7 +113,7 @@ class MessageAttachment(models.Model):
     )
     file = models.FileField(
         upload_to=messaging_attachment_path,
-        storage=private_messaging_storage,
+        storage=get_private_messaging_storage,
     )
     original_filename = models.CharField(max_length=255)
     file_type = models.CharField(max_length=16, choices=FileType.choices)
