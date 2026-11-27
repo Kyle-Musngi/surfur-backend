@@ -1,12 +1,9 @@
 import os
-import io
-import warnings
-from PIL import Image
 from pypdf import PdfReader
 from pypdf.generic import IndirectObject, DictionaryObject, ArrayObject
-from django.core.files.base import ContentFile
 from rest_framework import serializers
 from apps.core.validators import resolve_media_url
+from apps.core.images import IMAGE_EXTENSIONS, normalize_image
 from .models import Conversation, Message, MessageAttachment, MessageReadState, unread_after
 
 MAX_ATTACHMENTS_PER_MESSAGE = 5
@@ -14,7 +11,7 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_PDF_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
-ALLOWED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
+ALLOWED_IMAGE_EXTS = IMAGE_EXTENSIONS
 ALLOWED_PDF_EXTS = {'.pdf'}
 
 
@@ -64,26 +61,9 @@ def validate_messaging_attachments(files):
         if ext in ALLOWED_IMAGE_EXTS:
             if size > MAX_IMAGE_BYTES:
                 raise serializers.ValidationError(f'Image "{name}" exceeds the 5 MB limit.')
-            try:
-                f.seek(0)
-                with warnings.catch_warnings():
-                    warnings.simplefilter('error', Image.DecompressionBombWarning)
-                    img = Image.open(f)
-                    fmt = img.format
-                    expected = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.png': 'PNG', '.webp': 'WEBP'}[ext]
-                    if fmt != expected or img.width * img.height > 20000000:
-                        raise ValueError('Unsupported image encoding or dimensions')
-                    img.load()
-                    clean = io.BytesIO()
-                    img.save(clean, format=fmt)
-                    f = ContentFile(clean.getvalue(), name=name)
-                    size = f.size
-                    if size > MAX_IMAGE_BYTES:
-                        raise ValueError('Decoded image is too large')
-            except Exception:
-                raise serializers.ValidationError(f'Image "{name}" is invalid or corrupted.')
-            mime = Image.MIME[fmt]
-            validated.append((f, name, MessageAttachment.FileType.IMAGE, mime, size))
+            normalized = normalize_image(f, max_mb=5)
+            validated.append((normalized, normalized.name, MessageAttachment.FileType.IMAGE,
+                              normalized.content_type, normalized.size))
         elif ext in ALLOWED_PDF_EXTS:
             if size > MAX_PDF_BYTES:
                 raise serializers.ValidationError(f'PDF "{name}" exceeds the 10 MB limit.')
@@ -99,7 +79,7 @@ def validate_messaging_attachments(files):
             validated.append((f, name, MessageAttachment.FileType.PDF, 'application/pdf', size))
         else:
             raise serializers.ValidationError(
-                f'Unsupported file type for "{name}". Allowed: JPG, JPEG, PNG, WEBP, and PDF.'
+                f'Unsupported file type for "{name}". Use a supported raster image or PDF.'
             )
     return validated
 

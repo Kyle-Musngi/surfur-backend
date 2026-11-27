@@ -12,6 +12,20 @@ class LocationListView(generics.ListAPIView):
     permission_classes = [permissions.AllowAny]
 
 
+class ImageCapabilitiesView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        from .images import IMAGE_EXTENSIONS, MAX_PIXELS, MAX_SIDE
+        return Response({
+            'normalization': 'raster-v1',
+            'extensions': sorted(IMAGE_EXTENSIONS),
+            'max_upload_mb': 5, 'max_pixels': MAX_PIXELS, 'max_side': MAX_SIDE,
+            'output_formats': ['image/jpeg', 'image/png'],
+            'animation': 'first_frame',
+        })
+
+
 class PlatformConfigView(APIView):
     permission_classes = [permissions.AllowAny]
 

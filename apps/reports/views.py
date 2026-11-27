@@ -36,6 +36,7 @@ class StrayReportStatusHistorySerializer(serializers.ModelSerializer):
 
 
 class StrayReportSerializer(serializers.ModelSerializer):
+    photo = serializers.FileField(required=False, allow_null=True, write_only=True)
     photo_url = serializers.SerializerMethodField()
     city_name = serializers.CharField(source='city.name', read_only=True)
     assigned_organization_name = serializers.CharField(

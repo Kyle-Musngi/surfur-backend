@@ -275,7 +275,7 @@ class MessagingSystemTests(APITestCase):
         self.assertEqual(result.status_code, 201)
         attachment = result.data['attachments'][0]
         response = self.client.get(f"/api/v1/messaging/attachments/{attachment['id']}/")
-        self.assertEqual(response['Content-Type'], 'image/png')
+        self.assertEqual(response['Content-Type'], 'image/jpeg')
         self.assertEqual(response['Cache-Control'], 'private, no-store')
         response.close()
         self.client.force_authenticate(user=self.adopter)

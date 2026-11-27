@@ -91,6 +91,16 @@ class FavoriteSerializer(serializers.ModelSerializer):
 
 
 class PetCreateUpdateSerializer(serializers.ModelSerializer):
+    def save(self, **kwargs):
+        self._written_files = []
+        try:
+            return super().save(**kwargs)
+        except Exception:
+            # SQL rollback does not undo storage writes. Remove only files from this attempt.
+            for storage, name in self._written_files:
+                storage.delete(name)
+            raise
+
     shelter = serializers.PrimaryKeyRelatedField(
         queryset=Shelter.objects.filter(is_archived=False),
         required=False,
@@ -98,7 +108,7 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
     shelter_name = serializers.CharField(source='shelter.name', read_only=True)
     shelter_slug = serializers.CharField(source='shelter.slug', read_only=True)
     image_url = serializers.URLField(required=False, allow_blank=True, write_only=True)
-    uploaded_image = serializers.ImageField(required=False, allow_null=True, write_only=True)
+    uploaded_image = serializers.FileField(required=False, allow_null=True, write_only=True)
     primary_image_id = serializers.IntegerField(required=False, allow_null=True, write_only=True)
     primary_image_index = serializers.IntegerField(required=False, allow_null=True, write_only=True)
     remove_image_ids = serializers.CharField(required=False, allow_blank=True, write_only=True)
@@ -120,6 +130,8 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
         )
 
     def _get_uploaded_files(self):
+        if hasattr(self, '_normalized_files'):
+            return list(self._normalized_files)
         request = self.context.get('request')
         files = []
         if request is not None and hasattr(request, 'FILES'):
@@ -154,8 +166,6 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         files = self._get_uploaded_files()
-        for f in files:
-            validate_uploaded_image(f, max_mb=5)
 
         single = data.get('uploaded_image')
         new_count = len(files) + (1 if single else 0) + (1 if data.get('image_url') else 0)
@@ -167,6 +177,8 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'uploaded_images': f'Maximum {MAX_ANIMAL_IMAGES} photographs allowed per animal.'}
             )
+
+        self._normalized_files = [validate_uploaded_image(f, max_mb=5) for f in files]
 
         requested_status = data.get('adoption_status')
         if requested_status == 'adopted':
@@ -204,7 +216,8 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
         if remove_ids:
             for img in pet.images.filter(id__in=remove_ids):
                 if img.image_file:
-                    img.image_file.delete(save=False)
+                    storage, name = img.image_file.storage, img.image_file.name
+                    transaction.on_commit(lambda storage=storage, name=name: storage.delete(name))
                 img.delete()
 
         files = self._get_uploaded_files()
@@ -217,9 +230,11 @@ class PetCreateUpdateSerializer(serializers.ModelSerializer):
             make_primary = (primary_idx is not None and idx == primary_idx) or (
                 primary_idx is None and primary_id is None and not has_existing_primary and idx == 0
             )
-            created_images.append(
-                PetImage.objects.create(pet=pet, image_file=f, is_primary=make_primary)
-            )
+            image = PetImage(pet=pet, is_primary=make_primary)
+            image.image_file.save(f.name, f, save=False)
+            self._written_files.append((image.image_file.storage, image.image_file.name))
+            image.save()
+            created_images.append(image)
 
         if image_url and not files:
             PetImage.objects.create(
