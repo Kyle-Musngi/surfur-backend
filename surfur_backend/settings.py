@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'apps.donations',
     'apps.articles',
     'apps.notifications',
+    'apps.messaging',
 ]
 
 MIDDLEWARE = [

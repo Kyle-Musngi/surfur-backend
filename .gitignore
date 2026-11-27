@@ -28,6 +28,7 @@ wheels/
 db.sqlite3
 db.sqlite3-journal
 media/
+private_media/
 staticfiles/
 *.log
 
@@ -45,3 +46,4 @@ Thumbs.db
 # Backups
 backups/
 *.bak
+
