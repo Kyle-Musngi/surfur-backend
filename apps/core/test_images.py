@@ -147,3 +147,52 @@ class ImageUploadIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['normalization'], 'raster-v1')
         self.assertEqual(len(response.data['extensions']), 13)
+
+    @override_settings(DEBUG=False)
+    def test_public_media_served_in_production_and_blocks_traversal(self):
+        response = self.client.patch(
+            f'/api/v1/admin-panel/animals/{self.pet.id}/',
+            {'uploaded_images': [encoded('jpg')]},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        detail = self.client.get(f'/api/v1/pets/{self.pet.id}/').data
+        media_url = detail['primary_image']
+        path = '/' + media_url.split('://', 1)[1].split('/', 1)[1]
+
+        self.client.force_authenticate(user=None)
+        img_resp = self.client.get(path)
+        self.assertEqual(img_resp.status_code, 200)
+        self.assertEqual(img_resp['Content-Type'], 'image/jpeg')
+        self.assertEqual(img_resp['Cross-Origin-Resource-Policy'], 'cross-origin')
+        self.assertEqual(img_resp['X-Content-Type-Options'], 'nosniff')
+        img_resp.close()
+
+        for bad_path in ('/media/../private_media/secret.txt', '/media/../db.sqlite3', '/media/pets/'):
+            self.assertEqual(self.client.get(bad_path).status_code, 404)
+
+    def test_shelter_external_image_url_validation(self):
+        dynamic_url = 'https://images.example.org/cdn/render?id=12345&size=large#main'
+        resp = self.client.post('/api/v1/admin-panel/shelters/', {
+            'name': 'External URL Shelter',
+            'address': '123 Cebu St',
+            'city': self.city.id,
+            'latitude': '10.3157000',
+            'longitude': '123.8854000',
+            'profile_image': dynamic_url,
+            'cover_image': 'https://cdn.example.org/cover%20photo.webp?v=2',
+        }, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['profile_image'], dynamic_url)
+        self.assertEqual(resp.data['cover_image'], 'https://cdn.example.org/cover%20photo.webp?v=2')
+
+        for invalid in ('blob:https://surfur-frontend.vercel.app/123', 'javascript:alert(1)', 'not-a-url'):
+            bad_resp = self.client.post('/api/v1/admin-panel/shelters/', {
+                'name': f'Bad URL Shelter {invalid[:8]}',
+                'address': '123 Cebu St',
+                'city': self.city.id,
+                'latitude': '10.3157000',
+                'longitude': '123.8854000',
+                'profile_image': invalid,
+            }, format='json')
+            self.assertEqual(bad_resp.status_code, 400)

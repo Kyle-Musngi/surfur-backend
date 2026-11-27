@@ -42,6 +42,9 @@ class AdminPagination(PageNumberPagination):
     max_page_size = 100
 
 
+from apps.core.validators import validate_external_image_url
+
+
 # --- Serializers ---
 
 class AdminShelterSerializer(serializers.ModelSerializer):
@@ -98,6 +101,12 @@ class AdminShelterSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError('A shelter with this name already exists.')
         return cleaned
+
+    def validate_profile_image(self, value):
+        return validate_external_image_url(value)
+
+    def validate_cover_image(self, value):
+        return validate_external_image_url(value)
 
     def validate(self, data):
         lat = data.get('latitude', getattr(self.instance, 'latitude', None))

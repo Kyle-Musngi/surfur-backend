@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import Shelter, ShelterVerification
 from apps.core.serializers import CebuLocationSerializer
+from apps.core.validators import validate_external_image_url
 
 
 class ShelterListSerializer(serializers.ModelSerializer):
@@ -81,6 +82,12 @@ class ShelterRegistrationSerializer(serializers.ModelSerializer):
         if Shelter.objects.filter(name__iexact=cleaned_name).exists():
             raise serializers.ValidationError('An organization with this name has already been registered.')
         return cleaned_name
+
+    def validate_profile_image(self, value):
+        return validate_external_image_url(value)
+
+    def validate_cover_image(self, value):
+        return validate_external_image_url(value)
 
     def create(self, validated_data):
         from django.utils.text import slugify
